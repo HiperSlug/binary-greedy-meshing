@@ -1,8 +1,9 @@
+use std::f32::consts::FRAC_1_SQRT_2;
 use std::fmt::Debug;
-use bit_iter::BitIter;
-use enum_map::{Enum, EnumMap};
 
 use Face::*;
+use bit_iter::BitIter;
+use enum_map::{Enum, EnumMap};
 
 const MASK_6: u32 = (1 << 6) - 1;
 const MASK_XYZ: u32 = (1 << 18) - 1;
@@ -20,7 +21,6 @@ const SHIFT_H: u32 = 24;
 const SHIFT_U: u32 = 18;
 const SHIFT_V: u32 = 24;
 
-#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Enum)]
 pub enum Face {
     PosX = 0,
@@ -88,8 +88,7 @@ impl Debug for Quad {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Quad")
             .field("position", &self.xyz())
-            .field("width", &self.width())
-            .field("height", &self.height())
+            .field("size", &self.size())
             .field("id", &self.id)
             .finish()
     }
@@ -124,12 +123,12 @@ impl Quad {
     }
 
     #[inline]
-    pub const fn width(self) -> u32 {
+    pub const fn w(self) -> u32 {
         (self.other >> SHIFT_W) & MASK_6
     }
 
     #[inline]
-    pub const fn height(self) -> u32 {
+    pub const fn h(self) -> u32 {
         (self.other >> SHIFT_H) & MASK_6
     }
 
@@ -139,13 +138,17 @@ impl Quad {
     }
 
     #[inline]
+    pub const fn size(self) -> [u32; 2] {
+        [self.w(), self.h()]
+    }
+
+    #[inline]
     const fn packed_xyz(self) -> u32 {
         self.other & MASK_XYZ
     }
 
     pub const fn vertices(self, face: Face) -> [Vertex; 4] {
-        let w = self.width() as u32;
-        let h = self.height() as u32;
+        let [w, h] = self.size();
         let xyz = self.packed_xyz();
         match face {
             Face::NegX => [
@@ -187,10 +190,42 @@ impl Quad {
         }
     }
 
-    // TODO
-    // pub const fn matrix(self, face: Face) -> glam::Mat4 {
-    //     glam::Mat4::from_scale_rotation_translation(scale, rotation, translation)
-    // }
+    pub fn transform(self, face: Face) -> ([f32; 3], [f32; 4], [f32; 3]) {
+        fn as_f32(x: u32) -> f32 {
+            x as f32
+        }
+
+        let [x, y, z] = self.xyz().map(as_f32);
+        let [w, h] = self.size().map(as_f32);
+
+        let scale = [w, h, 0.];
+
+        let hw = w / 2.;
+        let hh = h / 2.;
+
+        let (translation, rotation) = match face {
+            PosX => (
+                [x + 1., y + hh, z + hw],
+                [0., FRAC_1_SQRT_2, 0.0, FRAC_1_SQRT_2],
+            ),
+            NegX => (
+                [x + 0., y + hh, z + hw],
+                [0., -FRAC_1_SQRT_2, 0., FRAC_1_SQRT_2],
+            ),
+            PosY => (
+                [x + hw, y + 1., z + hh],
+                [-FRAC_1_SQRT_2, 0., 0., FRAC_1_SQRT_2],
+            ),
+            NegY => (
+                [x + hw, y + 0., z + hh],
+                [FRAC_1_SQRT_2, 0., 0., FRAC_1_SQRT_2],
+            ),
+            PosZ => ([x + hw, y + hh, z + 1.], [0., 1., 0., 0.]),
+            NegZ => ([x + hw, y + hh, z + 0.], [0., 0., 0., 1.]),
+        };
+
+        (scale, rotation, translation)
+    }
 }
 
 #[inline]
@@ -199,9 +234,9 @@ const fn packed_xyz(x: u32, y: u32, z: u32) -> u32 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ChunkMesh(pub EnumMap<Face, Vec<Quad>>);
+pub struct QuadMesh(pub EnumMap<Face, Vec<Quad>>);
 
-impl ChunkMesh {
+impl QuadMesh {
     #[inline]
     pub fn len(&self) -> usize {
         self.0.values().map(|vec| vec.len()).sum()
@@ -267,14 +302,14 @@ impl MeshChanges {
 
     #[inline]
     pub fn to_array(self) -> [u64; 3] {
-        [self.x, self.y, self.z]
+        self.into()
     }
 }
 
 impl From<MeshChanges> for [u64; 3] {
     #[inline]
     fn from(value: MeshChanges) -> Self {
-        value.to_array()
+        [value.x, value.y, value.z]
     }
 }
 
@@ -338,5 +373,10 @@ impl Vertex {
     #[inline]
     pub const fn xyz(self) -> [u32; 3] {
         [self.x(), self.y(), self.z()]
+    }
+
+    #[inline]
+    pub const fn uv(self) -> [u32; 2] {
+        [self.u(), self.v()]
     }
 }

@@ -1,36 +1,14 @@
-use std::collections::BTreeSet;
+use std::collections::HashSet;
 
-use bevy::{
-    pbr::wireframe::{WireframeConfig, WireframePlugin},
-    prelude::*,
-    render::{
-        RenderPlugin,
-        mesh::{Indices, MeshVertexAttribute, PrimitiveTopology, VertexAttributeValues},
-        render_asset::RenderAssetUsages,
-        render_resource::VertexFormat,
-        settings::{RenderCreation, WgpuFeatures, WgpuSettings},
-    },
-};
+use bevy::pbr::wireframe::{WireframeConfig, WireframePlugin};
+use bevy::prelude::*;
 use binary_greedy_meshing as bgm;
-
-pub const ATTRIBUTE_VOXEL_DATA: MeshVertexAttribute =
-    MeshVertexAttribute::new("VoxelData", 48757581, VertexFormat::Uint32x2);
-
-const SIZE: usize = 16;
-const SIZE2: usize = SIZE.pow(2);
-const CS: usize = 62;
 
 fn main() {
     App::new()
         .init_resource::<WireframeConfig>()
         .add_plugins((
-            DefaultPlugins.set(RenderPlugin {
-                render_creation: RenderCreation::Automatic(WgpuSettings {
-                    features: WgpuFeatures::POLYGON_MODE_LINE,
-                    ..Default::default()
-                }),
-                ..default()
-            }),
+            DefaultPlugins,
             WireframePlugin::default(),
         ))
         .add_systems(Startup, setup)
@@ -40,101 +18,79 @@ fn main() {
 fn setup(
     mut commands: Commands,
     mut wireframe_config: ResMut<WireframeConfig>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     wireframe_config.global = true;
-
-    commands.spawn((
-        Transform::from_translation(Vec3::new(50.0, 100.0, 50.0)),
-        PointLight {
-            range: 200.0,
-            //intensity: 8000.0,
-            ..Default::default()
-        },
-    ));
-    commands.spawn((
-        Camera3d::default(),
-        Msaa::Sample4,
-        Transform::from_translation(Vec3::new(60.0, 60.0, 100.0))
-            .looking_at(Vec3::new(31.0, 31.0, 31.0), Vec3::Y),
-    ));
-    let mesh = Mesh3d(meshes.add(generate_mesh()));
-
-    commands.spawn((
-        mesh,
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::linear_rgba(0.1, 0.1, 0.1, 1.0),
-            ..Default::default()
-        })),
-    ));
 
     commands.insert_resource(AmbientLight {
         color: Color::WHITE,
         brightness: light_consts::lux::OVERCAST_DAY,
         ..Default::default()
     });
-}
 
-/// Generate 1 mesh per block type for simplicity, in practice we would use a texture array and a custom shader instead
-fn generate_mesh() -> Mesh {
-    let voxels = voxel_buffer();
-    let mut mesher = bgm::Mesher::<CS>::new();
-    let opaque_mask = bgm::compute_opaque_mask::<CS>(&voxels, &BTreeSet::new());
-    let trans_mask = vec![0; bgm::Mesher::<CS>::CS_P2].into_boxed_slice();
-    mesher.fast_mesh(&voxels, &opaque_mask, &trans_mask);
-    let mut positions = Vec::new();
-    let mut normals = Vec::new();
-    for (face_n, quads) in mesher.quads.iter().enumerate() {
-        let face: bgm::Face = (face_n as u8).into();
-        let n = face.n();
+    commands.spawn((
+        Transform::from_translation(vec3(50.0, 100.0, 50.0)),
+        PointLight {
+            range: 200.0,
+            //intensity: 8000.0,
+            ..Default::default()
+        },
+    ));
+
+    commands.spawn((
+        Camera3d::default(),
+        Transform::from_translation(vec3(60.0, 60.0, 100.0))
+            .looking_at(vec3(31.0, 31.0, 31.0), Vec3::Y),
+    ));
+
+    let rectangle = meshes.add(Rectangle::from_length(1.));
+    let color = materials.add(Color::linear_rgba(0.1, 0.1, 0.1, 1.0));
+
+    for (face, quads) in &generate_mesh().0 {
         for quad in quads {
-            let vertices_packed = face.vertices_packed(*quad);
-            for vertex in vertices_packed.iter() {
-                let [x, y, z] = vertex.xyz();
-                positions.push([x as f32, y as f32, z as f32]);
-                normals.push(n.clone());
-            }
+            let (scale, rotation, translation) = quad.transform(face);
+            commands.spawn((
+                Mesh3d(rectangle.clone()),
+                MeshMaterial3d(color.clone()),
+                Transform {
+                    scale: scale.into(),
+                    rotation: Quat::from_array(rotation),
+                    translation: translation.into(),
+                },
+            ));
         }
     }
-    let indices = bgm::indices(positions.len() / 4);
-    let mut mesh = Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::RENDER_WORLD,
-    );
-    mesh.insert_attribute(
-        Mesh::ATTRIBUTE_UV_0,
-        VertexAttributeValues::Float32x2(vec![[0.0; 2]; positions.len()]),
-    );
-    mesh.insert_attribute(
-        Mesh::ATTRIBUTE_POSITION,
-        VertexAttributeValues::Float32x3(positions),
-    );
-    mesh.insert_attribute(
-        Mesh::ATTRIBUTE_NORMAL,
-        VertexAttributeValues::Float32x3(normals),
-    );
-    mesh.insert_indices(Indices::U32(indices));
-    mesh
 }
 
-fn voxel_buffer() -> [u16; bgm::Mesher::<CS>::CS_P3] {
-    let mut voxels = [0; bgm::Mesher::<CS>::CS_P3];
-    for x in 0..CS {
-        for y in 0..CS {
-            for z in 0..CS {
-                voxels[bgm::pad_linearize::<CS>(x, y, z)] = sphere(x, y, z);
+fn generate_mesh() -> bgm::QuadMesh {
+    let transparents = HashSet::new();
+
+    let voxels = voxel_buffer();
+    let opaque_masks = bgm::compute_opaque_masks(&voxels, &transparents);
+    let transparent_masks = bgm::compute_transparent_masks(&voxels, &transparents);
+
+    let mut mesher = bgm::Mesher::new();
+
+    mesher.mesh(&voxels, &opaque_masks, &transparent_masks)
+}
+
+fn voxel_buffer() -> [u16; bgm::CUBE] {
+    let mut voxels = [0; bgm::CUBE];
+    for x in 0..bgm::LEN {
+        for y in 0..bgm::LEN {
+            for z in 0..bgm::LEN {
+                let i_3d = bgm::linearize_3d(x, y, z);
+                let pos = uvec3(x as u32, y as u32, z as u32);
+                let origin = uvec3(31, 31, 31);
+                let radius = 16;
+                voxels[i_3d] = inside_sphere(pos, origin, radius) as u16;
             }
         }
     }
     voxels
 }
 
-/// This returns an opaque sphere
-fn sphere(x: usize, y: usize, z: usize) -> u16 {
-    if (x as i32 - 31).pow(2) + (y as i32 - 31).pow(2) + (z as i32 - 31).pow(2) < SIZE2 as i32 {
-        1
-    } else {
-        0
-    }
+fn inside_sphere(pos: UVec3, origin: UVec3, radius: u32) -> bool {
+    (pos - origin).length_squared() > radius.pow(2)
 }

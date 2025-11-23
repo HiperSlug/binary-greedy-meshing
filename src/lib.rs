@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+
 use bit_iter::BitIter;
 use enum_map::{EnumMap, enum_map};
 
@@ -9,9 +10,9 @@ pub use types::*;
 
 const BITS: u32 = 6;
 
-const LEN: usize = 1 << BITS;
-const SQUARE: usize = LEN * LEN;
-const CUBE: usize = LEN * LEN * LEN;
+pub const LEN: usize = 1 << BITS;
+pub const SQUARE: usize = LEN * LEN;
+pub const CUBE: usize = LEN * LEN * LEN;
 
 const SHIFT_X_3D: u32 = 0 * BITS;
 const SHIFT_Y_3D: u32 = 1 * BITS;
@@ -40,7 +41,7 @@ fn linearize_2d(y: usize, z: usize) -> usize {
 }
 
 #[inline(always)]
-fn linearize_3d(x: usize, y: usize, z: usize) -> usize {
+pub fn linearize_3d(x: usize, y: usize, z: usize) -> usize {
     (x << SHIFT_X_3D) | (y << SHIFT_Y_3D) | (z << SHIFT_Z_3D)
 }
 
@@ -62,7 +63,7 @@ fn offset_3d(face: Face) -> isize {
 }
 
 #[inline(always)]
-fn adj_opaque(face: Face, pad_opaque: u64, opaque_masks: &[u64; SQUARE], i_2d: usize) -> u64{
+fn adj_opaque(face: Face, pad_opaque: u64, opaque_masks: &[u64; SQUARE], i_2d: usize) -> u64 {
     match face {
         PosX => pad_opaque >> 1,
         NegX => pad_opaque << 1,
@@ -206,40 +207,19 @@ impl InnerMesher {
 
         for z in BitIter::from(zs) {
             for y in 1..LEN - 1 {
-                self.fast_row_handler(
-                    voxels,
-                    opaque_masks,
-                    transparent_masks,
-                    !0,
-                    y,
-                    z,
-                );
+                self.fast_row_handler(voxels, opaque_masks, transparent_masks, !0, y, z);
             }
         }
 
         for z in BitIter::from(inv_zs) {
             for y in BitIter::from(ys) {
-                self.fast_row_handler(
-                    voxels,
-                    opaque_masks,
-                    transparent_masks,
-                    !0,
-                    y,
-                    z,
-                );
+                self.fast_row_handler(voxels, opaque_masks, transparent_masks, !0, y, z);
             }
         }
 
         for z in BitIter::from(inv_zs) {
             for y in BitIter::from(inv_ys) {
-                self.fast_row_handler(
-                    voxels,
-                    opaque_masks,
-                    transparent_masks,
-                    xs,
-                    y,
-                    z,
-                );
+                self.fast_row_handler(voxels, opaque_masks, transparent_masks, xs, y, z);
             }
         }
     }
@@ -252,14 +232,7 @@ impl InnerMesher {
     ) {
         for z in 1..LEN - 1 {
             for y in 1..LEN - 1 {
-                self.fast_row_handler(
-                    voxels,
-                    opaque_masks,
-                    transparent_masks,
-                    !0,
-                    y,
-                    z,
-                );
+                self.fast_row_handler(voxels, opaque_masks, transparent_masks, !0, y, z);
             }
         }
     }
@@ -489,7 +462,7 @@ impl Mesher {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     /// Meshes a voxel buffer representing a chunk, using an opaque and transparent mask with 1 u64 per column with 1 bit per voxel in the column,
     /// signaling if the voxel is opaque or transparent.
     /// This is ~4x faster than the regular mesh method but requires maintaining 2 masks for each chunk.
@@ -499,31 +472,38 @@ impl Mesher {
         voxels: &[u16; CUBE],
         opaque_masks: &[u64; SQUARE],
         transparent_masks: &[u64; SQUARE],
-    ) -> ChunkMesh {
-        self.inner.build_all_visible(voxels, opaque_masks, transparent_masks);
-        ChunkMesh(self.inner.face_merging(voxels))
+    ) -> QuadMesh {
+        self.inner
+            .build_all_visible(voxels, opaque_masks, transparent_masks);
+        QuadMesh(self.inner.face_merging(voxels))
     }
 
     /// Meshes a voxel buffer representing a chunk, using a BTreeSet signaling which voxel values are transparent.
     /// This is ~4x slower than the fast_mesh method but does not require maintaining 2 masks for each chunk.
     /// See https://github.com/Inspirateur/binary-greedy-meshing?tab=readme-ov-file#what-to-do-with-mesh_dataquads for using the output
-    pub fn slow_mesh(&mut self, voxels: &[u16; CUBE], transparents: &HashSet<u16>) -> ChunkMesh {
+    pub fn slow_mesh(&mut self, voxels: &[u16; CUBE], transparents: &HashSet<u16>) -> QuadMesh {
         self.inner.build_all_visible_slow(voxels, transparents);
-        ChunkMesh(self.inner.face_merging(voxels))
+        QuadMesh(self.inner.face_merging(voxels))
     }
 
     pub fn remesh_slow(
         &mut self,
         voxels: &[u16; CUBE],
         transparents: &HashSet<u16>,
-        mesh: &mut ChunkMesh,
+        mesh: &mut QuadMesh,
         changes: MeshChanges,
     ) {
         let [xs, ys, zs] = changes
             .to_array()
             .map(|x| ((x << 1) | (x >> 1) | x) & !PAD_MASK);
 
-        self.inner.build_visible_slow(voxels, transparents, BitIter::from(xs), BitIter::from(ys), BitIter::from(zs));
+        self.inner.build_visible_slow(
+            voxels,
+            transparents,
+            BitIter::from(xs),
+            BitIter::from(ys),
+            BitIter::from(zs),
+        );
 
         self.merge_and_splice(voxels, mesh, xs, ys, zs);
     }
@@ -533,20 +513,30 @@ impl Mesher {
         voxels: &[u16; CUBE],
         opaque_masks: &[u64; SQUARE],
         transparent_masks: &[u64; SQUARE],
-        mesh: &mut ChunkMesh,
+        mesh: &mut QuadMesh,
         changes: MeshChanges,
     ) {
         let [xs, ys, zs] = changes
             .to_array()
             .map(|x| ((x << 1) | (x >> 1) | x) & !PAD_MASK);
 
-        self.inner.build_visible(voxels, opaque_masks, transparent_masks, xs, ys, zs);
+        self.inner
+            .build_visible(voxels, opaque_masks, transparent_masks, xs, ys, zs);
 
         self.merge_and_splice(voxels, mesh, xs, ys, zs);
     }
 
-    fn merge_and_splice(&mut self, voxels: &[u16; CUBE], mesh: &mut ChunkMesh, xs: u64, ys: u64, zs: u64) {
-        fn as_u32(usize: usize) -> u32 { usize as u32 }
+    fn merge_and_splice(
+        &mut self,
+        voxels: &[u16; CUBE],
+        mesh: &mut QuadMesh,
+        xs: u64,
+        ys: u64,
+        zs: u64,
+    ) {
+        fn as_u32(usize: usize) -> u32 {
+            usize as u32
+        }
 
         for (face, quads) in &mut mesh.0 {
             self.scratch.clear();
@@ -567,7 +557,8 @@ impl Mesher {
                     }
                 }
                 PosY | NegY => {
-                    self.inner.merge_y(voxels, BitIter::from(ys), face, &mut self.scratch);
+                    self.inner
+                        .merge_y(voxels, BitIter::from(ys), face, &mut self.scratch);
 
                     let mut src_start = 0;
                     for y in BitIter::from(ys).map(as_u32) {
@@ -582,7 +573,8 @@ impl Mesher {
                     }
                 }
                 PosZ | NegZ => {
-                    self.inner.merge_z(voxels, BitIter::from(zs), face, &mut self.scratch);
+                    self.inner
+                        .merge_z(voxels, BitIter::from(zs), face, &mut self.scratch);
 
                     let mut src_start = 0;
                     for z in BitIter::from(zs).map(as_u32) {
@@ -649,7 +641,6 @@ pub fn compute_transparent_masks(
     transparent_mask
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -662,7 +653,7 @@ mod tests {
         let mut voxels = Box::new([0; CUBE]);
         voxels[linearize_3d(1, 1, 1)] = 1;
         voxels[linearize_3d(1, 2, 1)] = 1;
-        
+
         let opaque_masks = compute_opaque_masks(&voxels, &transparents);
         let transparent_masks = compute_transparent_masks(&voxels, &transparents);
 
@@ -680,11 +671,9 @@ mod tests {
         let transparents = HashSet::from([2]);
 
         let voxels = test_buffer();
-        let opaque_masks = 
-            compute_opaque_masks(&voxels, &transparents);
-        let transparent_masks =
-            compute_transparent_masks(&voxels, &transparents);
-        
+        let opaque_masks = compute_opaque_masks(&voxels, &transparents);
+        let transparent_masks = compute_transparent_masks(&voxels, &transparents);
+
         let mut mesher = Mesher::new();
 
         let mesh = mesher.mesh(&voxels, &opaque_masks, &transparent_masks);
