@@ -1,3 +1,5 @@
+fn main() {}
+
 // use std::collections::BTreeSet;
 
 // use bevy::pbr::wireframe::{WireframeConfig, WireframePlugin};

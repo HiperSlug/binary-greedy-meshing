@@ -1,110 +1,112 @@
-// use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::hint::black_box;
 
-// use binary_greedy_meshing as bgm;
-// use criterion::{Criterion, black_box, criterion_group, criterion_main};
-// const SIZE: usize = 16;
-// const SIZE2: usize = SIZE.pow(2);
-// const CS: usize = 62;
+use binary_greedy_meshing as bgm;
+use criterion::{Criterion, criterion_group, criterion_main};
+use enum_map::EnumMap;
+use glam::IVec3;
+use ndshape::ConstShape;
 
-// fn voxel_buffer<F>(f: F) -> Box<[u16; bgm::Mesher::<CS>::CS_P3]>
-// where
-//     F: Fn(usize, usize, usize) -> u16,
-// {
-//     let mut voxels = Box::new([0; bgm::Mesher::<CS>::CS_P3]);
-//     for x in 0..CS {
-//         for y in 0..CS {
-//             for z in 0..CS {
-//                 voxels[bgm::pad_linearize::<CS>(x, y, z)] = f(x, y, z);
-//             }
-//         }
-//     }
-//     voxels
-// }
+struct Blocks(Vec<bool>);
 
-// fn opaque_sphere(x: usize, y: usize, z: usize) -> u16 {
-//     if (x as i32 - 31).pow(2) + (y as i32 - 31).pow(2) + (z as i32 - 31).pow(2) < SIZE2 as i32 {
-//         1
-//     } else {
-//         0
-//     }
-// }
+impl bgm::MesherContext for Blocks {
+    type Voxel = u16;
+    type InnerVoxel = u16;
 
-// fn transparent_sphere(x: usize, y: usize, z: usize) -> u16 {
-//     if x == SIZE / 2 {
-//         2
-//     } else if (x as i32 - 31).pow(2) + (y as i32 - 31).pow(2) + (z as i32 - 31).pow(2)
-//         < SIZE2 as i32
-//     {
-//         1
-//     } else {
-//         0
-//     }
-// }
+    #[inline]
+    fn into_inner(&self, voxel: Self::Voxel) -> Option<Self::InnerVoxel> {
+        (voxel != u16::MAX).then_some(voxel)
+    }
 
-// fn fast_mesh_opaque(c: &mut Criterion) {
-//     let voxels = voxel_buffer(opaque_sphere);
-//     let mut mesher = bgm::Mesher::<CS>::new();
-//     let opaque_mask = bgm::compute_opaque_mask::<CS>(voxels.as_slice(), &BTreeSet::new());
-//     let trans_mask = vec![0; bgm::Mesher::<CS>::CS_P2].into_boxed_slice();
-//     c.bench_function("fast_mesh_opaque", |b| {
-//         b.iter(|| {
-//             mesher.clear();
-//             mesher.fast_mesh(
-//                 black_box(voxels.as_slice()),
-//                 black_box(&opaque_mask),
-//                 black_box(&trans_mask),
-//             );
-//         })
-//     });
-// }
+    #[inline]
+    fn is_visible(&self, voxel: Self::Voxel, adj_voxel: Self::Voxel) -> bool {
+        voxel != adj_voxel && self.0[voxel as usize]
+    }
 
-// fn mesh_opaque(c: &mut Criterion) {
-//     let voxels = voxel_buffer(opaque_sphere);
-//     let mut mesher = bgm::Mesher::<CS>::new();
-//     let transparents = BTreeSet::new();
-//     c.bench_function("mesh_opaque", |b| {
-//         b.iter(|| {
-//             mesher.clear();
-//             mesher.mesh(black_box(voxels.as_slice()), black_box(&transparents));
-//         })
-//     });
-// }
+    #[inline]
+    fn can_merge(&self, voxel: Self::Voxel, adj_voxel: Self::Voxel) -> bool {
+        voxel == adj_voxel
+    }
 
-// fn fast_mesh_transparent(c: &mut Criterion) {
-//     let voxels = voxel_buffer(transparent_sphere);
-//     let mut mesher = bgm::Mesher::<CS>::new();
-//     let transparent_blocks = BTreeSet::from([2]);
-//     let opaque_mask = bgm::compute_opaque_mask::<CS>(voxels.as_slice(), &BTreeSet::new());
-//     let trans_mask = bgm::compute_transparent_mask::<CS>(voxels.as_slice(), &transparent_blocks);
-//     c.bench_function("fast_mesh_transparent", |b| {
-//         b.iter(|| {
-//             mesher.clear();
-//             mesher.fast_mesh(
-//                 black_box(voxels.as_slice()),
-//                 black_box(&opaque_mask),
-//                 black_box(&trans_mask),
-//             );
-//         })
-//     });
-// }
+    #[inline]
+    fn u26_shader_id(&self, voxel: Self::InnerVoxel, _face: bgm::Face) -> u32 {
+        voxel as u32
+    }
+}
 
-// fn mesh_transparent(c: &mut Criterion) {
-//     let voxels = voxel_buffer(transparent_sphere);
-//     let mut mesher = bgm::Mesher::<CS>::new();
-//     let transparent_blocks = BTreeSet::from([2]);
-//     c.bench_function("mesh_transparent", |b| {
-//         b.iter(|| {
-//             mesher.clear();
-//             mesher.mesh(black_box(voxels.as_slice()), black_box(&transparent_blocks));
-//         })
-//     });
-// }
+struct Chunk([u16; bgm::CUBE]);
 
-// criterion_group!(
-//     mesh,
-//     fast_mesh_opaque,
-//     mesh_opaque,
-//     fast_mesh_transparent,
-//     mesh_transparent
-// );
-// criterion_main!(mesh);
+struct View<'a> {
+    main: &'a Chunk,
+    adj: EnumMap<bgm::Face, Option<&'a Chunk>>,
+}
+
+impl<'a> View<'a> {
+    pub fn new(map: &'a HashMap<IVec3, Chunk>, pos: IVec3) -> Option<Self> {
+        Some(Self {
+            main: map.get(&pos)?,
+            adj: EnumMap::from_fn(|face: bgm::Face| map.get(&(pos + face.to_ivec3()))),
+        })
+    }
+}
+
+impl<'a> bgm::MesherView for View<'a> {
+    type Voxel = u16;
+
+    #[inline]
+    fn get(&self, offset: [usize; 3]) -> Self::Voxel {
+        let index = bgm::Shape::linearize(offset);
+        self.main.0[index]
+    }
+}
+
+impl<'a> bgm::MesherViewAdjacent for View<'a> {
+    #[inline]
+    fn get_adjacent(&self, offset: [usize; 3], face: bgm::Face) -> Option<Self::Voxel> {
+        let index = bgm::Shape::linearize(offset);
+        self.adj[face].map(|c| c.0[index])
+    }
+}
+
+fn init() -> (HashMap<IVec3, Chunk>, Blocks) {
+    let context = Blocks(vec![false]);
+
+    let mut map = HashMap::new();
+    let chunk = map
+        .entry(IVec3::ZERO)
+        .or_insert(Chunk([u16::MAX; bgm::CUBE]));
+
+    for x in 0..bgm::LEN {
+        for y in 0..bgm::LEN {
+            for z in 0..bgm::LEN {
+                let i_3d = bgm::Shape::linearize([x, y, z]);
+                if inside_sphere([x as u32 - 31, y as u32 - 31, z as u32 - 31], 16) {
+                    chunk.0[i_3d] = 0;
+                }
+            }
+        }
+    }
+
+    (map, context)
+}
+
+fn inside_sphere(pos: [u32; 3], radius: u32) -> bool {
+    let length_squared = pos.into_iter().fold(0, |fold, elem| fold + elem * elem);
+    length_squared < radius.pow(2)
+}
+
+fn mesh(c: &mut Criterion) {
+    let (map, context) = black_box(init());
+    let view = View::new(&map, IVec3::ZERO).unwrap();
+
+    let mut mesher = bgm::Mesher::new();
+
+    c.bench_function("mesh", |b| {
+        b.iter(|| {
+            mesher.mesh(&view, &context);
+        });
+    });
+}
+
+criterion_group!(mesh_group, mesh);
+criterion_main!(mesh_group);

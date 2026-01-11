@@ -1,27 +1,26 @@
-use std::f32::consts::FRAC_1_SQRT_2;
 use std::fmt::Debug;
 
-use Face::*;
-use bit_iter::BitIter;
-use enum_map::{Enum, EnumMap};
+use bytemuck::{Pod, Zeroable};
+use enum_map::Enum;
+use glam::IVec3;
 
+const MASK_26: u32 = (1 << 26) - 1;
 const MASK_6: u32 = (1 << 6) - 1;
-const MASK_XYZ: u32 = (1 << 18) - 1;
+const MASK_2: u32 = (1 << 2) - 1;
 
-// `Quad` & `Vertex`
 const SHIFT_X: u32 = 0;
 const SHIFT_Y: u32 = 6;
 const SHIFT_Z: u32 = 12;
-
-// `Quad`
 const SHIFT_W: u32 = 18;
 const SHIFT_H: u32 = 24;
+const SHIFT_AO_A: u32 = 30;
+const SHIFT_ID: u32 = 0;
+const SHIFT_AO_B: u32 = 26;
+const SHIFT_AO_C: u32 = 28;
+const SHIFT_AO_D: u32 = 30;
 
-// `Vertex`
-const SHIFT_U: u32 = 18;
-const SHIFT_V: u32 = 24;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Enum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Enum)]
 pub enum Face {
     PosX = 0,
     NegX = 1,
@@ -31,352 +30,156 @@ pub enum Face {
     NegZ = 5,
 }
 
-#[derive(Debug)]
-pub struct GreaterThanFive;
-
-impl TryFrom<u8> for Face {
-    type Error = GreaterThanFive;
-
-    #[inline]
-    fn try_from(value: u8) -> Result<Self, GreaterThanFive> {
-        match value {
-            0 => Ok(PosX),
-            1 => Ok(NegX),
-            2 => Ok(PosY),
-            3 => Ok(NegY),
-            4 => Ok(PosZ),
-            5 => Ok(NegZ),
-            _ => Err(GreaterThanFive),
-        }
-    }
-}
-
 impl Face {
-    pub const ALL: [Self; 6] = [PosX, NegX, PosY, NegY, PosZ, NegZ];
+    pub const ALL: [Self; 6] = [
+        Self::PosX,
+        Self::NegX,
+        Self::PosY,
+        Self::NegY,
+        Self::PosZ,
+        Self::NegZ,
+    ];
 
-    #[inline]
-    pub const fn normal(self) -> [f32; 3] {
+    pub const fn to_ivec3(self) -> IVec3 {
         match self {
-            PosX => [1., 0., 0.],
-            NegX => [-1., 0., 0.],
-            PosY => [0., 1., 0.],
-            NegY => [0., -1., 0.],
-            PosZ => [0., 0., 1.],
-            NegZ => [0., 0., -1.],
+            Self::PosX => IVec3::X,
+            Self::NegX => IVec3::NEG_X,
+            Self::PosY => IVec3::Y,
+            Self::NegY => IVec3::NEG_Y,
+            Self::PosZ => IVec3::Z,
+            Self::NegZ => IVec3::NEG_Z,
         }
     }
 }
 
-// TODO: Ambient Occlusion. Possibly steal 6 bits from `voxel_id` for 2 bit per vertex.
-/// # Layout of `other`
+/// # Contents
+/// Holds a position offset inside it's chunk, a size, ambient occlusion, and the id of the voxel that created it
+///
+/// # Layout
 /// x: 6 bits \
 /// y: 6 bits \
 /// z: 6 bits \
 /// width (w): 6 bits \
 /// height (h): 6 bits \
+/// ao (o): 8 bits \
+/// id (v): 26 bits \
 ///
-/// 0b00hh_hhhh_wwww_wwzz_zzzz_yyyy_yyxx_xxxx
-#[repr(C)]
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(feature = "bytemuck", derive(bytemuck::Zeroable, bytemuck::Pod))]
-pub struct Quad {
-    pub other: u32,
-    pub id: u32,
-}
+/// [0baaaa_aavv_vvvv_vvvv_vvvv_vvvv_vvvv_vvvv, 0baahh_hhhh_wwww_wwzz_zzzz_yyyy_yyxx_xxxx]
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Zeroable, Pod)]
+pub struct Quad([u32; 2]);
 
 impl Debug for Quad {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Quad")
             .field("position", &self.xyz())
             .field("size", &self.size())
-            .field("id", &self.id)
+            .field("ao", &self.ao())
+            .field("id", &self.id())
             .finish()
     }
 }
 
 impl Quad {
-    #[inline]
-    pub const fn new(x: u32, y: u32, z: u32, w: u32, h: u32, id: u32) -> Self {
-        Self {
-            other: (h << SHIFT_H)
-                | (w << SHIFT_W)
-                | (z << SHIFT_Z)
-                | (y << SHIFT_Y)
-                | (x << SHIFT_X),
-            id,
-        }
+    pub const fn new(xyz: [u32; 3], size: [u32; 2], ao: [u32; 4], id: u32) -> Self {
+        Self([
+            ((xyz[0] & MASK_6) << SHIFT_X)
+                | ((xyz[1] & MASK_6) << SHIFT_Y)
+                | ((xyz[2] & MASK_6) << SHIFT_Z)
+                | ((size[0] & MASK_6) << SHIFT_W)
+                | ((size[1] & MASK_6) << SHIFT_H)
+                | ((ao[0] & MASK_2) << SHIFT_AO_A),
+            ((id & MASK_26) << SHIFT_ID)
+                | ((ao[1] & MASK_2) << SHIFT_AO_B)
+                | ((ao[2] & MASK_2) << SHIFT_AO_C)
+                | ((ao[3] & MASK_2) << SHIFT_AO_D),
+        ])
     }
 
-    #[inline]
     pub const fn x(self) -> u32 {
-        (self.other >> SHIFT_X) & MASK_6
+        (self.0[0] >> SHIFT_X) & MASK_6
     }
 
-    #[inline]
     pub const fn y(self) -> u32 {
-        (self.other >> SHIFT_Y) & MASK_6
+        (self.0[0] >> SHIFT_Y) & MASK_6
     }
 
-    #[inline]
     pub const fn z(self) -> u32 {
-        (self.other >> SHIFT_Z) & MASK_6
+        (self.0[0] >> SHIFT_Z) & MASK_6
     }
 
-    #[inline]
     pub const fn w(self) -> u32 {
-        (self.other >> SHIFT_W) & MASK_6
+        (self.0[0] >> SHIFT_W) & MASK_6
     }
 
-    #[inline]
     pub const fn h(self) -> u32 {
-        (self.other >> SHIFT_H) & MASK_6
+        (self.0[0] >> SHIFT_H) & MASK_6
     }
 
-    #[inline]
+    pub const fn ao_a(self) -> u32 {
+        (self.0[0] >> SHIFT_AO_A) & MASK_2
+    }
+
+    pub const fn ao_b(self) -> u32 {
+        (self.0[1] >> SHIFT_AO_B) & MASK_2
+    }
+
+    pub const fn ao_c(self) -> u32 {
+        (self.0[1] >> SHIFT_AO_C) & MASK_2
+    }
+
+    pub const fn ao_d(self) -> u32 {
+        (self.0[1] >> SHIFT_AO_D) & MASK_2
+    }
+
+    pub const fn id(self) -> u32 {
+        (self.0[1] >> SHIFT_ID) & MASK_26
+    }
+
     pub const fn xyz(self) -> [u32; 3] {
         [self.x(), self.y(), self.z()]
     }
 
-    #[inline]
     pub const fn size(self) -> [u32; 2] {
         [self.w(), self.h()]
     }
 
-    #[inline]
-    const fn packed_xyz(self) -> u32 {
-        self.other & MASK_XYZ
-    }
-
-    pub const fn vertices(self, face: Face) -> [Vertex; 4] {
-        let [w, h] = self.size();
-        let xyz = self.packed_xyz();
-        match face {
-            Face::NegX => [
-                Vertex::from_xyz_u_v(xyz, h, w),
-                Vertex::from_xyz_u_v(xyz + packed_xyz(0, 0, h), 0, w),
-                Vertex::from_xyz_u_v(xyz + packed_xyz(0, w, 0), h, 0),
-                Vertex::from_xyz_u_v(xyz + packed_xyz(0, w, h), 0, 0),
-            ],
-            Face::NegY => [
-                Vertex::from_xyz_u_v(xyz - packed_xyz(w, 0, 0) + packed_xyz(0, 0, h), w, h),
-                Vertex::from_xyz_u_v(xyz - packed_xyz(w, 0, 0), w, 0),
-                Vertex::from_xyz_u_v(xyz + packed_xyz(0, 0, h), 0, h),
-                Vertex::from_xyz_u_v(xyz, 0, 0),
-            ],
-            Face::NegZ => [
-                Vertex::from_xyz_u_v(xyz, w, h),
-                Vertex::from_xyz_u_v(xyz + packed_xyz(0, h, 0), w, 0),
-                Vertex::from_xyz_u_v(xyz + packed_xyz(w, 0, 0), 0, h),
-                Vertex::from_xyz_u_v(xyz + packed_xyz(w, h, 0), 0, 0),
-            ],
-            Face::PosX => [
-                Vertex::from_xyz_u_v(xyz, 0, 0),
-                Vertex::from_xyz_u_v(xyz + packed_xyz(0, 0, h), h, 0),
-                Vertex::from_xyz_u_v(xyz - packed_xyz(0, w, 0), 0, w),
-                Vertex::from_xyz_u_v(xyz + packed_xyz(0, 0, h) - packed_xyz(0, w, 0), h, w),
-            ],
-            Face::PosY => [
-                Vertex::from_xyz_u_v(xyz + packed_xyz(w, 0, h), w, h),
-                Vertex::from_xyz_u_v(xyz + packed_xyz(w, 0, 0), w, 0),
-                Vertex::from_xyz_u_v(xyz + packed_xyz(0, 0, h), 0, h),
-                Vertex::from_xyz_u_v(xyz, 0, 0),
-            ],
-            Face::PosZ => [
-                Vertex::from_xyz_u_v(xyz - packed_xyz(w, 0, 0) + packed_xyz(0, h, 0), 0, 0),
-                Vertex::from_xyz_u_v(xyz - packed_xyz(w, 0, 0), 0, h),
-                Vertex::from_xyz_u_v(xyz + packed_xyz(0, h, 0), w, 0),
-                Vertex::from_xyz_u_v(xyz, w, h),
-            ],
-        }
-    }
-
-    pub fn transform(self, face: Face) -> ([f32; 3], [f32; 4], [f32; 3]) {
-        fn as_f32(x: u32) -> f32 {
-            x as f32
-        }
-
-        let [x, y, z] = self.xyz().map(as_f32);
-        let [w, h] = self.size().map(as_f32);
-
-        let scale = [w, h, 0.];
-
-        let hw = w / 2.;
-        let hh = h / 2.;
-
-        let (translation, rotation) = match face {
-            PosX => (
-                [x + 1., y + hh, z + hw],
-                [0., FRAC_1_SQRT_2, 0.0, FRAC_1_SQRT_2],
-            ),
-            NegX => (
-                [x + 0., y + hh, z + hw],
-                [0., -FRAC_1_SQRT_2, 0., FRAC_1_SQRT_2],
-            ),
-            PosY => (
-                [x + hw, y + 1., z + hh],
-                [-FRAC_1_SQRT_2, 0., 0., FRAC_1_SQRT_2],
-            ),
-            NegY => (
-                [x + hw, y + 0., z + hh],
-                [FRAC_1_SQRT_2, 0., 0., FRAC_1_SQRT_2],
-            ),
-            PosZ => ([x + hw, y + hh, z + 1.], [0., 1., 0., 0.]),
-            NegZ => ([x + hw, y + hh, z + 0.], [0., 0., 0., 1.]),
-        };
-
-        (scale, rotation, translation)
+    pub const fn ao(self) -> [u32; 4] {
+        [self.ao_a(), self.ao_b(), self.ao_c(), self.ao_d()]
     }
 }
 
-#[inline]
-const fn packed_xyz(x: u32, y: u32, z: u32) -> u32 {
-    (z << SHIFT_Z) | (y << SHIFT_Y) | (x << SHIFT_X)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct QuadMesh(pub EnumMap<Face, Vec<Quad>>);
-
-impl QuadMesh {
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.0.values().map(|vec| vec.len()).sum()
-    }
-}
-
-#[derive(Default, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct MeshChanges {
-    x: u64,
-    y: u64,
-    z: u64,
-}
-
-impl Debug for MeshChanges {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MeshChanges")
-            .field("x", &self.xs().collect::<Vec<_>>())
-            .field("y", &self.ys().collect::<Vec<_>>())
-            .field("z", &self.zs().collect::<Vec<_>>())
-            .finish()
-    }
-}
-
-impl MeshChanges {
-    #[inline]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    #[inline]
-    pub const fn push(&mut self, [x, y, z]: [u32; 3]) {
-        self.x |= 1 << x;
-        self.y |= 1 << y;
-        self.z |= 1 << z;
-    }
-
-    #[inline]
-    pub const fn is_empty(self) -> bool {
-        self.x == 0
-    }
-
-    #[inline]
-    pub const fn clear(&mut self) {
-        self.x = 0;
-        self.y = 0;
-        self.z = 0;
-    }
-
-    #[inline]
-    pub fn xs(self) -> impl Iterator<Item = usize> {
-        BitIter::from(self.x)
-    }
-
-    #[inline]
-    pub fn ys(self) -> impl Iterator<Item = usize> {
-        BitIter::from(self.y)
-    }
-
-    #[inline]
-    pub fn zs(self) -> impl Iterator<Item = usize> {
-        BitIter::from(self.z)
-    }
-
-    #[inline]
-    pub fn to_array(self) -> [u64; 3] {
-        self.into()
-    }
-}
-
-impl From<MeshChanges> for [u64; 3] {
-    #[inline]
-    fn from(value: MeshChanges) -> Self {
-        [value.x, value.y, value.z]
-    }
-}
-
-/// # Layout
-/// x: 6 bits \
-/// y: 6 bits \
-/// z: 6 bits \
-/// u: 6 bits \
-/// v: 6 bits \
+/// This should be infallible and is restricted to within the meshed chunk
 ///
-/// 0b00vv_vvvv_uuuu_uuzz_zzzz_yyyy_yyxx_xxxx
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Vertex(pub u32);
+/// ## Speed
+/// I suggest you `#[inline]` these functions
+pub trait MesherView {
+    type Voxel;
 
-impl Debug for Vertex {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("Vertex")
-            .field("position", &self.xyz())
-            .field("u", &self.u())
-            .field("v", &self.v())
-            .finish()
-    }
+    fn get(&self, offset: [usize; 3]) -> Self::Voxel;
 }
 
-impl Vertex {
-    #[inline]
-    pub const fn new(x: u32, y: u32, z: u32, u: u32, v: u32) -> Self {
-        Self((x << SHIFT_X) | (y << SHIFT_Y) | (z << SHIFT_Z) | (u << SHIFT_U) | (v << SHIFT_V))
-    }
+/// Tries to get the voxel in the adjacent (touching faces) chunk determined by `face` at the `offset`. If the chunk doesn't exist return None.
+pub trait MesherViewAdjacent: MesherView {
+    fn get_adjacent(&self, offset: [usize; 3], face: Face) -> Option<Self::Voxel>;
+}
 
-    #[inline]
-    const fn from_xyz_u_v(xyz: u32, u: u32, v: u32) -> Self {
-        Self((v << SHIFT_V) | (u << SHIFT_U) | (xyz << SHIFT_X))
-    }
+/// Tries to get the voxel in the neighboring (3x3x3 cube) chunk determined by `delta` at the `offset`. If the chunk doesn't exist return None.
+pub trait MesherViewNeighborhood: MesherView {
+    fn get_neighborhood(&self, offset: [usize; 3], delta: [i32; 3]) -> Option<Self::Voxel>;
+}
 
-    #[inline]
-    pub const fn x(self) -> u32 {
-        (self.0 >> SHIFT_X) & MASK_6
-    }
+/// Determines which voxels exist, are visible, are merged, and how they are represented in shaders.
+pub trait MesherContext {
+    type Voxel;
+    type InnerVoxel;
 
-    #[inline]
-    pub const fn y(self) -> u32 {
-        (self.0 >> SHIFT_Y) & MASK_6
-    }
+    fn into_inner(&self, voxel: Self::Voxel) -> Option<Self::InnerVoxel>;
 
-    #[inline]
-    pub const fn z(self) -> u32 {
-        (self.0 >> SHIFT_Z) & MASK_6
-    }
+    fn is_visible(&self, voxel: Self::InnerVoxel, adj_voxel: Self::InnerVoxel) -> bool;
 
-    #[inline]
-    pub const fn u(self) -> u32 {
-        (self.0 >> SHIFT_U) & MASK_6
-    }
+    fn can_merge(&self, voxel: Self::Voxel, adj_voxel: Self::Voxel) -> bool;
 
-    #[inline]
-    pub const fn v(self) -> u32 {
-        (self.0 >> SHIFT_V) & MASK_6
-    }
-
-    #[inline]
-    pub const fn xyz(self) -> [u32; 3] {
-        [self.x(), self.y(), self.z()]
-    }
-
-    #[inline]
-    pub const fn uv(self) -> [u32; 2] {
-        [self.u(), self.v()]
-    }
+    fn u26_shader_id(&self, voxel: Self::InnerVoxel, face: Face) -> u32;
 }
